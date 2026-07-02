@@ -1,9 +1,10 @@
 # 价格模型与后台 API 设计
 
-> 版本：v1.1
-> 日期：2026-07-02
+> 版本：v1.2
+> 日期：2026-07-03
 > 状态：已实现（catalog-service + catalog-backoffice-web + catalog-web 接入）
 > v1.1 变更：商品/分类中英双语字段；客户访问码登录；公开取价 API；catalog-web 接真实接口
+> v1.2 变更：商品副标题（双语）；规格（spec）与图文详情（富文本）分离；前台商品详情页
 
 ---
 
@@ -45,7 +46,7 @@ Customer        客户 → 关联一个价格组（可为空）
 - PostgreSQL，库名 `catalog`（开发环境 localhost:5432，postgres/123456）。
 - 表由 JPA `ddl-auto: update` 自动建：`categories`、`products`、`product_prices`、`price_levels`、`price_groups`、`price_group_rules`、`customers`、`admin_users`。
 - 分类为两级：一级 `parent_id IS NULL` 且**不带图片**；二级带 `image_url`。层级限制在 API 层强制。
-- **中英双语**：分类 `name_zh`/`name_en`，商品 `name_zh`/`name_en`、`description_zh`/`description_en`。中文必填、英文可空，前端展示时互为回落；搜索同时匹配中英文名。
+- **中英双语**：分类 `name_zh`/`name_en`，商品 `name_zh`/`name_en`、`subtitle_zh`/`subtitle_en`（副标题，列表页卖点文案）、`description_zh`/`description_en`（规格 spec，一行一条）、`detail_zh`/`detail_en`（图文详情，富文本 HTML，仅后台可编辑）。中文必填、英文可空，前端展示时互为回落；搜索同时匹配中英文名。
 - **客户访问码**：`customers.access_code`（唯一，8 位、去除易混淆字符），后台生成/重置，客户用它在前台登录。
 
 ## 3. catalog-service 后台 API（第一版）
@@ -86,8 +87,8 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 | GET | `/api/public/auth/me` | `{name, priceGroupName}` |
 | POST | `/api/public/auth/logout` | 仅清除客户会话 |
 | GET | `/api/public/categories` | 两级分类树（双语 + 二级图片） |
-| GET | `/api/public/products` | 仅上架商品，分页 `?categoryId&keyword&page&size`；每个商品返回 `price`（服务端按当前客户价格组解析的适用价）与 `listPrice` |
-| GET | `/api/public/products/{id}` | 商品详情（同上取价）；下架 → 404 |
+| GET | `/api/public/products` | 仅上架商品，分页 `?categoryId&keyword&page&size`；列表项轻量：双语名称+副标题，`price`（服务端按当前客户价格组解析的适用价）与 `listPrice`，不含规格/详情 |
+| GET | `/api/public/products/{id}` | 商品详情（同上取价）：追加规格 `descriptionZh/En`（按行展示）与图文详情 `detailZh/En`（富文本 HTML）；下架 → 404 |
 
 > 取价只在服务端做，响应只含"当前身份适用的一个价格"，不泄漏其他级别价。fallback 链见第 1 节，已实现于 `service/PriceResolver.java`，并有 E2E 验证（二级规则命中 / 一级规则命中但缺级别价回落默认级别 / 匿名 listPrice）。
 
@@ -95,13 +96,13 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 
 - Vite 8 + React 19 + antd 6 + react-router 7；`pnpm dev` 启动（5173）。
 - Vite 代理：`/api`、`/uploads` → `http://localhost:8081`，同源无 CORS。
-- 已实现页面：登录、商品管理（分页/搜索/分类筛选/级别价编辑/图片上传）、分类管理（两级树、二级图片）、价格组（规则编辑器）、价格级别、客户管理；订单页为占位。
+- 已实现页面：登录、商品管理（分页/搜索/分类筛选/级别价编辑/图片上传/双语副标题与规格/图文详情富文本编辑器 Quill 2，插图走 `/api/admin/uploads`）、分类管理（两级树、二级图片）、价格组（规则编辑器）、价格级别、客户管理；订单页为占位。
 - 路由守卫：未登录访问任何页面 → 重定向 `/login`；API 401 → 自动跳登录页。
 
 ## 5. catalog-web（已接入真实 API）
 
 - Next.js rewrites 把 `/api`、`/uploads` 代理到 catalog-service（`CATALOG_API_URL` 环境变量可覆盖，默认 localhost:8081），同源无 CORS。
-- 页面：产品（一级分类侧栏 + 二级分类图片卡）、分类商品列表、搜索、购物车（localStorage，价格实时按登录身份取）、我的（访问码登录/退出 + 中英文切换）。
+- 页面：产品（一级分类侧栏 + 二级分类图片卡）、分类商品列表（卡片含双语副标题，点卡片进详情）、商品详情 `/product/{id}`（大图 → 名称/副标题 → 价格/划线价/单位 → 规格参数按行展示 → 图文详情富文本渲染 → 底部加购栏）、搜索、购物车（localStorage，价格实时按登录身份取）、我的（访问码登录/退出 + 中英文切换）。
 - 双语：语言存 localStorage（`lib/i18n.tsx`），产品/分类名按语言显示并互为回落。
 - 划线价：`price < listPrice` 时显示划线原价。
 - 注意：本机 3000 端口被其他进程占用时 next dev 会自动用 3001。
@@ -111,4 +112,4 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 - [ ] 订单模块（下单、订单列表、状态流转、价格快照）
 - [ ] 修改 admin 密码功能、后台账号管理
 - [ ] 生产环境配置（数据库密码外置、HTTPS、上传目录持久化）
-- [ ] catalog-web 商品详情页（目前只有列表）
+- [x] catalog-web 商品详情页（v1.2 已实现）
