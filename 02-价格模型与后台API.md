@@ -1,10 +1,11 @@
 # 价格模型与后台 API 设计
 
-> 版本：v1.2
+> 版本：v1.3
 > 日期：2026-07-03
 > 状态：已实现（catalog-service + catalog-backoffice-web + catalog-web 接入）
 > v1.1 变更：商品/分类中英双语字段；客户访问码登录；公开取价 API；catalog-web 接真实接口
 > v1.2 变更：商品副标题（双语）；规格（spec）与图文详情（富文本）分离；前台商品详情页
+> v1.3 变更：后台角色/权限（模块级权限点 + 自定义角色）；账号管理；修改密码
 
 ---
 
@@ -44,7 +45,8 @@ Customer        客户 → 关联一个价格组（可为空）
 ## 2. 数据库
 
 - PostgreSQL，库名 `catalog`（开发环境 localhost:5432，postgres/123456）。
-- 表由 JPA `ddl-auto: update` 自动建：`categories`、`products`、`product_prices`、`price_levels`、`price_groups`、`price_group_rules`、`customers`、`admin_users`。
+- 表由 JPA `ddl-auto: update` 自动建：`categories`、`products`、`product_prices`、`price_levels`、`price_groups`、`price_group_rules`、`customers`、`admin_users`、`roles`。
+- **角色/权限**：权限点为固定枚举（`PRODUCT` 商品 / `CATEGORY` 分类 / `PRICE` 价格组+级别 / `CUSTOMER` 客户 / `ORDER` 订单 / `SYSTEM` 账号+角色）；`roles` 表存角色名 + 逗号分隔的权限点；`admin_users.role_id` 关联角色。内置"超级管理员"角色（`builtin=true`）拥有全部权限、不可改不可删；历史无角色账号启动时自动补为超管（DataSeeder 一次性迁移）。
 - 分类为两级：一级 `parent_id IS NULL` 且**不带图片**；二级带 `image_url`。层级限制在 API 层强制。
 - **中英双语**：分类 `name_zh`/`name_en`，商品 `name_zh`/`name_en`、`subtitle_zh`/`subtitle_en`（副标题，列表页卖点文案）、`description_zh`/`description_en`（规格 spec，一行一条）、`detail_zh`/`detail_en`（图文详情，富文本 HTML，仅后台可编辑）。中文必填、英文可空，前端展示时互为回落；搜索同时匹配中英文名。
 - **客户访问码**：`customers.access_code`（唯一，8 位、去除易混淆字符），后台生成/重置，客户用它在前台登录。
@@ -58,11 +60,14 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/auth/login` | `{username, password}`；错误 → 401 `{message}` |
-| GET | `/api/auth/me` | 当前登录人 `{username, displayName}` |
+| GET | `/api/auth/me` | 当前登录人 `{username, displayName, roleName, permissions:[]}`（超管返回全部权限点） |
+| POST | `/api/auth/password` | 修改自己的密码 `{oldPassword, newPassword}`；原密码错 / 新密码 <6 位 → 400 |
 | POST | `/api/auth/logout` | 退出 |
 
 默认账号：`admin / admin123`（首次启动自动创建，**上线前必须改**）。
 除 `/api/auth/**`、`/api/public/**`、`/uploads/**` 外全部需要登录（401）。
+
+**权限校验**（`PermissionInterceptor`，覆盖全部 `/api/admin/**`）：按 URL 前缀映射权限点，无权限 → 403 `{message}`。每次请求实时读角色，改角色立即生效无需重登。`/api/admin/uploads` 为商品图/分类图/富文本插图共用，有 `PRODUCT` 或 `CATEGORY` 之一即可；未列入映射的管理路径仅超管可访问（安全默认）。
 
 ### 管理接口（均需登录）
 
@@ -74,6 +79,8 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 | 价格组 | `GET/POST /api/admin/price-groups`，`PUT/DELETE .../{id}` | 含 `defaultPriceLevelId` 与 `rules:[{categoryId,priceLevelId}]`（保存整体重建）；有客户关联时删除 → 400 |
 | 客户 | `GET/POST /api/admin/customers`，`PUT/DELETE .../{id}` | 分页 `?page&size&keyword`（搜姓名/电话）；`priceGroupId` 可空 |
 | 上传 | `POST /api/admin/uploads`（multipart `file`） | 仅图片（jpg/png/gif/webp，≤10MB），返回 `{url:"/uploads/xxx.png"}`；文件存 `catalog-service/uploads/`（已 gitignore） |
+| 角色 | `GET/POST /api/admin/roles`，`PUT/DELETE .../{id}`，`GET .../permissions` | 角色 = 名称 + 权限点集合；`/permissions` 返回全部权限点 `{code,label}`；内置角色改/删 → 400；角色下有账号删 → 400 |
+| 账号 | `GET/POST /api/admin/users`，`PUT/DELETE .../{id}` | 创建需 `username/password(≥6位)/roleId`；编辑时 `password` 留空不改（填了即重置）。守卫：不能删/停用自己、不能改自己的角色；非超管不能操作超管账号、不能分配超管角色（防提权） |
 
 另有 `POST /api/admin/customers/{id}/access-code`：生成/重置客户访问码（旧码立即失效）。
 
@@ -96,8 +103,10 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 
 - Vite 8 + React 19 + antd 6 + react-router 7；`pnpm dev` 启动（5173）。
 - Vite 代理：`/api`、`/uploads` → `http://localhost:8081`，同源无 CORS。
-- 已实现页面：登录、商品管理（分页/搜索/分类筛选/级别价编辑/图片上传/双语副标题与规格/图文详情富文本编辑器 Quill 2，插图走 `/api/admin/uploads`）、分类管理（两级树、二级图片）、价格组（规则编辑器）、价格级别、客户管理；订单页为占位。
+- 已实现页面：登录、商品管理（分页/搜索/分类筛选/级别价编辑/图片上传/双语副标题与规格/图文详情富文本编辑器 Quill 2，插图走 `/api/admin/uploads`）、分类管理（两级树、二级图片）、价格组（规则编辑器）、价格级别、客户管理、系统管理（账号管理 + 角色管理，权限勾选编辑）；订单页为占位。
 - 路由守卫：未登录访问任何页面 → 重定向 `/login`；API 401 → 自动跳登录页。
+- 权限联动：侧栏菜单按当前账号权限过滤；直连无权限 URL 显示 403 页（`RequirePerm`）；首页跳转到第一个有权限的模块。右上角用户下拉含"修改密码"。
+- 注意：商品的各级别价随 `PRODUCT` 权限一起开放（编辑商品即可改级别价）；如需对店员隐藏批发价，给其角色只开分类/订单等权限。
 
 ## 5. catalog-web（已接入真实 API）
 
@@ -110,6 +119,6 @@ Base URL: `http://localhost:8081`（8080 被本机其他服务占用）
 ## 6. 待办 / 下一步
 
 - [ ] 订单模块（下单、订单列表、状态流转、价格快照）
-- [ ] 修改 admin 密码功能、后台账号管理
 - [ ] 生产环境配置（数据库密码外置、HTTPS、上传目录持久化）
 - [x] catalog-web 商品详情页（v1.2 已实现）
+- [x] 修改密码、后台账号管理、角色/权限（v1.3 已实现）
